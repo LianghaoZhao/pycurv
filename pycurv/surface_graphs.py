@@ -1609,7 +1609,10 @@ class TriangleGraph(SurfaceGraph):
             self.graph.set_vertex_filter(self.graph.vp.is_near_border.t(lambda x: 1-x))
             # Purge filtered out vertices and edges from the graph:
             self.graph.purge_vertices()
-            # Update graph's dictionary coordinates_to_vertex_index:
+            # Remove the properties used for filtering that are no longer true:
+            del self.graph.vertex_properties["num_strong_edges"]
+            del self.graph.vertex_properties["is_on_border"]
+            del self.graph.vertex_properties["is_near_border"]            # Update graph's dictionary coordinates_to_vertex_index:
             self.update_coordinates_to_vertex_index()
 
     def find_vertices_outside_mask(
