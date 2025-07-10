@@ -1541,8 +1541,7 @@ class TriangleGraph(SurfaceGraph):
             print('Filtering out the vertices at the graph borders and their '
                   'edges...')
             # Set the filter to get only vertices NOT on border.
-            self.graph.set_vertex_filter(self.graph.vp.is_on_border,
-                                         inverted=True)
+            self.graph.set_vertex_filter(self.graph.vp.is_on_border.t(lambda x: 1-x))
             # Purge the filtered out vertices and edges permanently from the
             # graph:
             self.graph.purge_vertices()
@@ -1607,15 +1606,13 @@ class TriangleGraph(SurfaceGraph):
             print('Filtering out those vertices and their edges...')
             # Set the filter to get only vertices NOT within distance b to
             # border.
-            self.graph.set_vertex_filter(self.graph.vp.is_near_border,
-                                         inverted=True)
-            # Purge filtered out vertices and edges permanently from the graph:
+            self.graph.set_vertex_filter(self.graph.vp.is_near_border.t(lambda x: 1-x))
+            # Purge filtered out vertices and edges from the graph:
             self.graph.purge_vertices()
             # Remove the properties used for filtering that are no longer true:
             del self.graph.vertex_properties["num_strong_edges"]
             del self.graph.vertex_properties["is_on_border"]
-            del self.graph.vertex_properties["is_near_border"]
-            # Update graph's dictionary coordinates_to_vertex_index:
+            del self.graph.vertex_properties["is_near_border"]            # Update graph's dictionary coordinates_to_vertex_index:
             self.update_coordinates_to_vertex_index()
 
     def find_vertices_outside_mask(
@@ -1731,7 +1728,7 @@ class TriangleGraph(SurfaceGraph):
             # Set the filter to get only vertices NOT {near border and outside
             # mask}.
             self.graph.set_vertex_filter(
-                self.graph.vp.is_near_border_and_outside_mask, inverted=True)
+                self.graph.vp.is_near_border_and_outside_mask.t(lambda x: 1-x))
             # Purge filtered out vertices and edges permanently from the graph:
             self.graph.purge_vertices()
             # Remove the properties used for filtering that are no longer true:
@@ -1771,7 +1768,7 @@ class TriangleGraph(SurfaceGraph):
             print('Filtering out those vertices and edges not belonging to the '
                   'largest connected component...')
             # Set the filter to get only vertices belonging to the lcc.
-            self.graph.set_vertex_filter(is_in_lcc, inverted=False)
+            self.graph.set_vertex_filter(is_in_lcc)
             # Purge filtered out vertices and edges permanently from the graph:
             self.graph.purge_vertices()
             # Update graph's dictionary coordinates_to_vertex_index:
@@ -1828,8 +1825,8 @@ class TriangleGraph(SurfaceGraph):
                       'to the small components...')
                 # Set the filter to get only vertices NOT belonging to a small
                 # component.
-                self.graph.set_vertex_filter(self.graph.vp.small_component,
-                                             inverted=True)
+                self.graph.set_vertex_filter(
+                    self.graph.vp.small_component.t(lambda x: 1-x))
                 # Purge filtered out vertices and edges from the graph:
                 self.graph.purge_vertices()
                 # Update graph's dictionary coordinates_to_vertex_index:
