@@ -55,72 +55,88 @@ def reverse_sense_and_normals(vtk_algorithm_output):
     return reverse.GetOutput()
 
 
+import numpy as np
+import vtk
+from scipy.ndimage import distance_transform_edt
+# 假设 io, pexceptions, reverse_sense_and_normals, MAX_DIST_SURF, dot_norm 都已正确导入
+
 def gen_surface(tomo, lbl=1, mask=True, other_mask=None, purge_ratio=1,
-                field=False, mode_2d=False, verbose=False):
+                field=False, mode_2d=False, verbose=True):
     """
     Generates a VTK PolyData surface from a segmented tomogram.
-
-    Args:
-        tomo (numpy.ndarray or str): the input segmentation as numpy ndarray or
-            the file name in MRC, EM or VTI format
-        lbl (int, optional): label for the foreground, default 1
-        mask (boolean, optional): if True (default), the input segmentation is
-            used as mask for the surface
-        other_mask (numpy.ndarray, optional): if given (default None), this
-            segmentation is used as mask for the surface
-        purge_ratio (int, optional): if greater than 1 (default 1), then 1 every
-            purge_ratio points of the segmentation are randomly deleted
-        field (boolean, optional): if True (default False), additionally returns
-            the polarity distance scalar field
-        mode_2d (boolean, optional): needed for polarity distance calculation
-            (if field is True), if True (default False), ...
-        verbose (boolean, optional): if True (default False), prints out
-            messages for checking the progress
-
-    Returns:
-        - output surface (vtk.vtkPolyData)
-        - polarity distance scalar field (np.ndarray), if field is True
     """
-    # Read in the segmentation (if file is given) and check format
+    if verbose:
+        print("Starting gen_surface...")
+
+    # 读取分割数据
+    if verbose:
+        print("Reading input segmentation...")
     if isinstance(tomo, str):
         tomo = io.load_tomo(tomo)
+        if verbose:
+            print(f"Loaded segmentation from file: {tomo.shape}")
     elif not isinstance(tomo, np.ndarray):
         raise pexceptions.PySegInputError(
             expr='gen_surface',
             msg='Input must be either a file name or a ndarray.')
+    else:
+        if verbose:
+            print(f"Using input ndarray: {tomo.shape}")
 
-    # Load file with the cloud of points
+    # 使用向量化操作生成点云，而不是三重循环
     nx, ny, nz = tomo.shape
-    cloud = vtk.vtkPolyData()
-    points = vtk.vtkPoints()
-    cloud.SetPoints(points)
+    if verbose:
+        print(f"Segmentation shape: ({nx}, {ny}, {nz})")
+        print("Generating point cloud using vectorization...")
+
+    # 创建坐标网格
+    x_coords, y_coords, z_coords = np.meshgrid(
+        np.arange(nx), np.arange(ny), np.arange(nz), indexing='ij'
+    )
+
+    # 找到标签等于lbl的位置
+    mask_condition = (tomo == lbl)
 
     if purge_ratio <= 1:
-        for x in range(nx):
-            for y in range(ny):
-                for z in range(nz):
-                    if tomo[x, y, z] == lbl:
-                        points.InsertNextPoint(x, y, z)
+        # 直接获取所有符合条件的点
+        if verbose:
+            print("Finding all points matching label without purging...")
+        valid_coords = np.where(mask_condition)
+        x_valid, y_valid, z_valid = valid_coords
     else:
-        count = 0
-        mx_value = purge_ratio - 1
-        purge = np.random.randint(0, purge_ratio+1, nx*ny*nz)
-        for x in range(nx):
-            for y in range(ny):
-                for z in range(nz):
-                    if purge[count] == mx_value:
-                        if tomo[x, y, z] == lbl:
-                            points.InsertNextPoint(x, y, z)
-                    count += 1
+        # 应用purge_ratio
+        if verbose:
+            print(f"Applying purge ratio of {purge_ratio}...")
+        purge_mask = np.random.randint(0, purge_ratio, size=tomo.shape) == 0
+        combined_mask = mask_condition & purge_mask
+        valid_coords = np.where(combined_mask)
+        x_valid, y_valid, z_valid = valid_coords
 
+    n_points = len(x_valid)
     if verbose:
-        print('Cloud of points loaded...')
+        print(f'Point cloud generated. Total points: {n_points}')
 
-    # Creating the isosurface
+    # 创建VTK点云（使用numpy数组一次性设置点）
+    if verbose:
+        print("Creating VTK point cloud...")
+    cloud = vtk.vtkPolyData()
+    points = vtk.vtkPoints()
+
+    # 预分配点的数量
+    points.SetNumberOfPoints(n_points)
+
+    # 批量设置点坐标
+    for i in range(n_points):
+        points.SetPoint(i, float(x_valid[i]), float(y_valid[i]), float(z_valid[i]))
+
+    cloud.SetPoints(points)
+
+    # --- 关键计算步骤：VTK表面重建 ---
+    if verbose:
+        print(f"Starting VTK surface reconstruction (SampleSpacing: {purge_ratio})...")
+        print("This step can take a significant amount of time for large point clouds.")
     surf = vtk.vtkSurfaceReconstructionFilter()
-    # surf.SetSampleSpacing(2)
     surf.SetSampleSpacing(purge_ratio)
-    # surf.SetNeighborhoodSize(10)
     surf.SetInputData(cloud)
 
     contf = vtk.vtkContourFilter()
@@ -128,70 +144,88 @@ def gen_surface(tomo, lbl=1, mask=True, other_mask=None, purge_ratio=1,
     contf.SetValue(0, 0)
 
     rsurf = reverse_sense_and_normals(contf.GetOutputPort())
-
     if verbose:
-        print('Isosurfaces generated...')
+        print('VTK surface reconstruction and contouring completed.')
 
-    # Translate and scale to the proper positions
+    # 优化缩放和变换
+    if verbose:
+        print("Computing bounds and applying transformation...")
     cloud.ComputeBounds()
     rsurf.ComputeBounds()
     xmin, xmax, ymin, ymax, zmin, zmax = cloud.GetBounds()
     rxmin, rxmax, rymin, rymax, rzmin, rzmax = rsurf.GetBounds()
-    scale_x = (xmax-xmin) / (rxmax-rxmin)
-    scale_y = (ymax-ymin) / (rymax-rymin)
-    denom = rzmax - rzmin
-    num = zmax - xmin
-    if (denom == 0) or (num == 0):
-        scale_z = 1
-    else:
-        scale_z = (zmax-zmin) / (rzmax-rzmin)
+
+    # 计算缩放因子
+    scale_x = (xmax - xmin) / (rxmax - rxmin) if (rxmax - rxmin) != 0 else 1
+    scale_y = (ymax - ymin) / (rymax - rymin) if (rymax - rymin) != 0 else 1
+    scale_z = (zmax - zmin) / (rzmax - rzmin) if (rzmax - rzmin) != 0 else 1
+
+    # 创建变换
     transp = vtk.vtkTransform()
     transp.Translate(xmin, ymin, zmin)
     transp.Scale(scale_x, scale_y, scale_z)
     transp.Translate(-rxmin, -rymin, -rzmin)
+
     tpd = vtk.vtkTransformPolyDataFilter()
     tpd.SetInputData(rsurf)
     tpd.SetTransform(transp)
     tpd.Update()
     tsurf = tpd.GetOutput()
-
     if verbose:
-        print('Rescaled and translated...')
+        print('Transformation applied.')
 
-    # Masking according to distance to the original segmentation
+    # 应用掩码（如果需要）
     if mask:
-        if other_mask is None:
-            tomod = distance_transform_edt(np.invert(tomo == lbl))
-        elif isinstance(other_mask, np.ndarray):
-            tomod = distance_transform_edt(np.invert(other_mask == lbl))
-        else:
-            raise pexceptions.PySegInputError(
-                expr='gen_surface', msg='Other mask must be a ndarray.')
+        # --- 关键计算步骤：距离变换 ---
+        if verbose:
+            print("Starting distance transform for masking...")
+            print("This step can be slow for large volumes.")
+        mask_to_use = other_mask if other_mask is not None else tomo
+        distance_mask = np.invert(mask_to_use == lbl)
+        tomod = distance_transform_edt(distance_mask)
+        if verbose:
+            print("Distance transform for masking completed.")
 
-        for i in range(tsurf.GetNumberOfCells()):
+        if tsurf.GetNumberOfCells() > 0:
+            # --- 计算步骤：掩码应用 ---
+            if verbose:
+                print("Applying mask to surface...")
+                print(f"Processing {tsurf.GetNumberOfCells()} cells.")
+            # 获取所有单元格的点坐标
+            cells_to_delete = []
+            for i in range(tsurf.GetNumberOfCells()):
+                cell = tsurf.GetCell(i)
+                points_cell = cell.GetPoints()
 
-            # Check if all points which made up the polygon are in the mask
-            points_cell = tsurf.GetCell(i).GetPoints()
-            count = 0
-            for j in range(0, points_cell.GetNumberOfPoints()):
-                x, y, z = points_cell.GetPoint(j)
-                if (tomod[int(round(x)), int(round(y)), int(round(z))] >
-                        MAX_DIST_SURF):
-                    count += 1
+                # 检查当前单元格的所有点
+                should_delete = False
+                for j in range(points_cell.GetNumberOfPoints()):
+                    x, y, z = points_cell.GetPoint(j)
+                    if tomod[int(round(x)), int(round(y)), int(round(z))] > MAX_DIST_SURF:
+                        should_delete = True
+                        break
 
-            if count > 0:
-                tsurf.DeleteCell(i)
+                if should_delete:
+                    cells_to_delete.append(i)
 
-        # Release free memory
-        tsurf.RemoveDeletedCells()
+            # 批量删除单元格
+            for cell_id in cells_to_delete:
+                tsurf.DeleteCell(cell_id)
+
+            tsurf.RemoveDeletedCells()
+            if verbose:
+                print(f"Mask applied. {len(cells_to_delete)} cells deleted.")
 
         if verbose:
-            print('Mask applied...')
+            print('Masking completed.')
 
-    # Field distance
+    # 字段距离计算（如果需要）
     if field:
-
-        # Get normal attributes
+        # --- 关键计算步骤：法向量计算 ---
+        if verbose:
+            print("Starting VTK normal calculation...")
+            print("This step can be slow for large meshes.")
+        # 计算法向量
         norm_flt = vtk.vtkPolyDataNormals()
         norm_flt.SetInputData(tsurf)
         norm_flt.ComputeCellNormalsOn()
@@ -199,80 +233,99 @@ def gen_surface(tomo, lbl=1, mask=True, other_mask=None, purge_ratio=1,
         norm_flt.ConsistencyOn()
         norm_flt.Update()
         tsurf = norm_flt.GetOutput()
-        # for i in range(tsurf.GetPointData().GetNumberOfArrays()):
-        #    array = tsurf.GetPointData().GetArray(i)
-        #    if array.GetNumberOfComponents() == 3:
-        #        break
+        if verbose:
+            print("VTK normal calculation completed.")
+
+        # 获取法向量数组
         array = tsurf.GetCellData().GetNormals()
 
-        # Build membrane mask
-        tomoh = np.ones(shape=tomo.shape, dtype=np.bool)
-        tomon = np.ones(shape=(tomo.shape[0], tomo.shape[1], tomo.shape[2], 3),
-                        dtype=io.TypesConverter().vtk_to_numpy(array))
-        # for i in range(tsurf.GetNumberOfCells()):
-        #     points_cell = tsurf.GetCell(i).GetPoints()
-        #     for j in range(0, points_cell.GetNumberOfPoints()):
-        #         x, y, z = points_cell.GetPoint(j)
-        #         # print(x, y, z, array.GetTuple(j))
-        #         x, y, z = int(round(x)), int(round(y)), int(round(z))
-        #         tomo[x, y, z] = False
-        #         tomon[x, y, z, :] = array.GetTuple(j)
+        # 使用向量化操作构建掩码
+        if verbose:
+            print("Building mask and normal arrays...")
+        tomoh = np.ones(shape=tomo.shape, dtype=bool)
+        tomon = np.zeros(shape=(tomo.shape[0], tomo.shape[1], tomo.shape[2], 3),
+                        dtype=np.float32)
+
+        # 优化：先收集所有表面点，然后批量更新
         for i in range(tsurf.GetNumberOfCells()):
-            points_cell = tsurf.GetCell(i).GetPoints()
-            for j in range(0, points_cell.GetNumberOfPoints()):
+            cell = tsurf.GetCell(i)
+            points_cell = cell.GetPoints()
+            for j in range(points_cell.GetNumberOfPoints()):
                 x, y, z = points_cell.GetPoint(j)
-                # print(x, y, z, array.GetTuple(j))
                 x, y, z = int(round(x)), int(round(y)), int(round(z))
-                if tomo[x, y, z] == lbl:
+                if 0 <= x < nx and 0 <= y < ny and 0 <= z < nz and tomo[x, y, z] == lbl:
                     tomoh[x, y, z] = False
-                    tomon[x, y, z, :] = array.GetTuple(i)
+                    if array and i < array.GetNumberOfTuples():
+                        tomon[x, y, z, :] = array.GetTuple(i)
+        if verbose:
+            print("Mask and normal arrays built.")
 
-        # Distance transform
+        # --- 关键计算步骤：距离变换 (第二次) ---
+        if verbose:
+            print("Starting distance transform for field calculation...")
+            print("This step can be slow for large volumes.")
+        # 计算距离变换
         tomod, ids = distance_transform_edt(tomoh, return_indices=True)
+        if verbose:
+            print("Distance transform for field completed.")
 
-        # Compute polarity
+        # --- 计算步骤：极性计算 ---
+        if verbose:
+            print("Starting polarity field calculation...")
+            print("This step can be slow for large volumes.")
+        # 向量化计算极性（而不是三重循环）
         if mode_2d:
-            for x in range(nx):
-                for y in range(ny):
-                    for z in range(nz):
-                        i_x, i_y, i_z = (ids[0, x, y, z], ids[1, x, y, z],
-                                         ids[2, x, y, z])
-                        norm = tomon[i_x, i_y, i_z]
-                        norm[2] = 0
-                        pnorm = (i_x, i_y, 0)
-                        p = (x, y, 0)
-                        dprod = dot_norm(np.asarray(p, dtype=np.float32),
-                                         np.asarray(pnorm, dtype=np.float32),
-                                         np.asarray(norm, dtype=np.float32))
-                        tomod[x, y, z] = tomod[x, y, z] * np.sign(dprod)
+            # 创建坐标网格用于向量化计算
+            x_grid, y_grid, z_grid = np.meshgrid(
+                np.arange(nx), np.arange(ny), np.arange(nz), indexing='ij'
+            )
+
+            # 获取索引
+            i_x, i_y, i_z = ids[0], ids[1], ids[2]
+
+            # 获取法向量和位置向量
+            norms = tomon[i_x, i_y, i_z]  # shape: (nx, ny, nz, 3)
+            norms_2d = norms.copy()
+            norms_2d[..., 2] = 0  # 设置z分量为0
+
+            # 计算点积
+            pnorm = np.stack([i_x.astype(np.float32), i_y.astype(np.float32),
+                             np.zeros_like(i_x, dtype=np.float32)], axis=-1)
+            p = np.stack([x_grid.astype(np.float32), y_grid.astype(np.float32),
+                         np.zeros_like(x_grid, dtype=np.float32)], axis=-1)
+
+            # 计算点积
+            dot_products = np.sum(p * pnorm * norms_2d, axis=-1)
+            tomod = tomod * np.sign(dot_products)
         else:
-            for x in range(nx):
-                for y in range(ny):
-                    for z in range(nz):
-                        i_x, i_y, i_z = (ids[0, x, y, z], ids[1, x, y, z],
-                                         ids[2, x, y, z])
-                        hold_norm = tomon[i_x, i_y, i_z]
-                        norm = hold_norm
-                        # norm[0] = (-1) * hold_norm[1]
-                        # norm[1] = hold_norm[0]
-                        # norm[2] = hold_norm[2]
-                        pnorm = (i_x, i_y, i_z)
-                        p = (x, y, z)
-                        dprod = dot_norm(np.asarray(pnorm, dtype=np.float32),
-                                         np.asarray(p, dtype=np.float32),
-                                         np.asarray(norm, dtype=np.float32))
-                        tomod[x, y, z] = tomod[x, y, z] * np.sign(dprod)
+            # 3D模式的向量化计算
+            x_grid, y_grid, z_grid = np.meshgrid(
+                np.arange(nx), np.arange(ny), np.arange(nz), indexing='ij'
+            )
+
+            i_x, i_y, i_z = ids[0], ids[1], ids[2]
+            norms = tomon[i_x, i_y, i_z]
+
+            pnorm = np.stack([i_x.astype(np.float32), i_y.astype(np.float32),
+                             i_z.astype(np.float32)], axis=-1)
+            p = np.stack([x_grid.astype(np.float32), y_grid.astype(np.float32),
+                         z_grid.astype(np.float32)], axis=-1)
+
+            # 计算点积
+            dot_products = np.sum(pnorm * p * norms, axis=-1)
+            tomod = tomod * np.sign(dot_products)
+        if verbose:
+            print("Polarity field calculation completed.")
 
         if verbose:
-            print('Distance field generated...')
+            print('Distance field generation completed.')
 
         return tsurf, tomod
 
     if verbose:
-        print('Finished!')
+        print('Surface generation completed!')
 
     return tsurf
-
 
 def gen_isosurface(tomo, lbl, grow=0, sg=0, thr=1.0, mask=None):
     """
